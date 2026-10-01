@@ -31,6 +31,8 @@ const store = {
 let state = { events: [], relations: [], currentVersionNo: 0 };
 let baseVersionNo = 0; // 发起修改时所基于的版本号
 let conflictData = null;
+let lastValidate = null; // 最近一次预检：{ selection, draftRevision }（供查看改选建议）
+let lastSuggestion = null; // 最近一次改选建议结果（“仅本浏览器套用”时使用）
 
 async function api(method, url, body) {
   const res = await fetch(url, {
@@ -224,9 +226,11 @@ async function doValidate() {
   const err = clientCheck();
   if (err) { showPublishResult('error', esc(err)); return; }
   try {
-    const data = await api('POST', '/api/editor/validate', { selection: gatherSelection() });
+    const selection = gatherSelection();
+    const data = await api('POST', '/api/editor/validate', { selection });
+    lastValidate = { selection, draftRevision: data.draftRevision };
     if (!data.ok) {
-      renderSolverErrors(data.errors);
+      renderSolverErrors(data.errors, true);
     } else {
       showPublishResult('ok', `
         <b>校验通过，可以发布。</b>系统确定的具体日期：
@@ -239,21 +243,27 @@ async function doValidate() {
   }
 }
 
-function renderSolverErrors(errors) {
+function renderSolverErrors(errors, fromValidate = false) {
   const typeName = { missing: '缺少主张', cycle: '关系成环', temporal: '时间无解', bad_selection: '主张选择无效', broken_relation: '关系失效' };
   const items = errors.map((er, i) => {
     const targets = [...new Set(er.eventIds.map((id) => `#event-card-${id}`))].join(',');
+    const suggestBtn = fromValidate && er.type === 'temporal'
+      ? `<div style="margin-top:6px"><button class="secondary" type="button"
+           data-suggest-index="${i}" style="padding:1px 10px;font-size:12px">查看改选建议…</button></div>`
+      : '';
     return `<li data-targets="${targets}" title="点击定位事件">
       <b>[${typeName[er.type] || er.type}]</b> ${esc(er.message)}
       ${er.detail ? `<div class="muted">涉事关系：${esc(er.detail)}</div>` : ''}
       ${er.relationIds && er.relationIds.length ? `<div class="muted">涉事关系 id：${er.relationIds.join(', ')}</div>` : ''}
+      ${suggestBtn}
     </li>`;
   }).join('');
   showPublishResult('error', `
     <b>无法发布，上一已发布版本保持不变。</b>
     <ul class="error-list">${items}</ul>`);
   document.querySelectorAll('#publishResult .error-list li').forEach((li) => {
-    li.addEventListener('click', () => {
+    li.addEventListener('click', (e) => {
+      if (e.target.closest('button')) return; // 条内按钮（如改选建议）不触发定位
       const targets = (li.dataset.targets || '').split(',').filter(Boolean);
       const first = targets[0] && document.querySelector(targets[0]);
       if (first) {
@@ -263,6 +273,100 @@ function renderSolverErrors(errors) {
       }
     });
   });
+}
+
+// ---------- 改选建议（只读） ----------
+async function openReselectSuggestion() {
+  if (!lastValidate) {
+    showGlobal('warn', '请先点击「校验能否发布」生成预检结果，再查看改选建议。');
+    return;
+  }
+  // 预检后草稿若已在本浏览器刷新过（修订号推进），提示重新预检
+  if (state.draftRevision != null && lastValidate.draftRevision !== state.draftRevision) {
+    showGlobal('warn', `草稿在预检后已变化（预检时修订号 #${lastValidate.draftRevision}，当前 #${state.draftRevision}），请重新执行预检后再查看改选建议。`);
+    return;
+  }
+  $('#suggestBody').innerHTML = '正在现有主张中搜索改选事件数最少的可行组合…';
+  $('#suggestApply').style.display = 'none';
+  $('#suggestDialog').showModal();
+  lastSuggestion = null;
+  try {
+    const data = await api('POST', '/api/editor/suggestions/reselect', {
+      selection: lastValidate.selection,
+      draftRevision: lastValidate.draftRevision,
+    });
+    lastSuggestion = data;
+    renderSuggestion(data);
+  } catch (e) {
+    renderSuggestionError(e);
+  }
+}
+
+function renderSuggestion(s) {
+  $('#suggestApply').style.display = '';
+  const dates = s.resolvedDates
+    .map((d) => `<li>${esc(d.resolvedDate)} — ${esc(d.title)}</li>`)
+    .join('');
+  let body = '';
+  if (s.changedEventCount === 0) {
+    body = `
+      <div class="alert ok"><b>当前各事件的被选主张本就可行，无需改选。</b></div>`;
+  } else {
+    const rows = s.changes.map((ch) => `
+      <li>
+        <b>${esc(ch.title)}</b>
+        <div class="muted">主张 #${ch.fromClaimId}（${esc(ch.fromClaim.dateLabel)}，区间 ${esc(ch.fromClaim.intervalStart)} ~ ${esc(ch.fromClaim.intervalEnd)}）
+          → <b>改选主张 #${ch.toClaimId}</b>（${esc(ch.toClaim.dateLabel)}，区间 ${esc(ch.toClaim.intervalStart)} ~ ${esc(ch.toClaim.intervalEnd)}）</div>
+        ${ch.toClaim.source ? `<div class="source"><b>改选后出处：</b>${esc(ch.toClaim.source)}</div>` : ''}
+      </li>`).join('');
+    body = `
+      <p>在<b>不改动「先于」关系与各主张日期区间</b>的前提下，找到可行组合：
+         只需改选 <b>${s.changedEventCount}</b> 个事件（已在所有可行组合中最少；平手已按事件 ID 顺序取主张 ID 序列最小者）。</p>
+      <div class="card" style="background:#fff">
+        <h3>逐项变更（${s.changes.length}）</h3>
+        <ul class="error-list" style="cursor:default;text-decoration:none">${rows}</ul>
+      </div>`;
+  }
+  body += `
+    <div class="card" style="background:#fff">
+      <h3>该组合的求解日期（严格满足全部先后关系）</h3>
+      <ul class="error-list" style="cursor:default;text-decoration:none">${dates}</ul>
+    </div>
+    <p class="muted">本建议<b>只读</b>：服务器未改动任何草稿或发布版本（依据草稿修订号 #${s.draftRevision} 计算）。
+       可点下方按钮<b>仅在本浏览器</b>把选择单选切换为建议组合，随后仍需自行「校验能否发布」；也可关闭后不改。</p>`;
+  $('#suggestBody').innerHTML = body;
+}
+
+function renderSuggestionError(e) {
+  $('#suggestApply').style.display = 'none';
+  if (e.message === 'unauthorized') { $('#suggestDialog').close(); return; }
+  let extra = '';
+  if (e.status === 409) {
+    extra = '草稿在预检后已被修改（可能由另一位编辑者操作），服务器<b>未返回任何建议</b>。请关闭后重新点击「校验能否发布」，再查看改选建议。';
+  } else if (e.status === 422 && e.body?.code === 'NO_FEASIBLE_COMBINATION') {
+    extra = '所有现有主张组合都不满足严格先后关系：改选无法解决，请调整「先于」关系或为相关事件补录新的时间主张。';
+  } else if (e.status === 422 && e.body?.code === 'CYCLE') {
+    extra = '「先于」关系成环，改选主张不能消除环；请先删除环上的关系。';
+  } else if (e.status === 422 && e.body?.code === 'NO_CLAIMS') {
+    extra = '有事件没有任何主张，无从改选；请先为其补录主张。';
+  } else if (e.status === 400) {
+    extra = '提交的被选主张不完整、重复或有主张不属于对应事件，请重新预检后再试。';
+  } else {
+    extra = esc(e.message);
+  }
+  $('#suggestBody').innerHTML = `<div class="alert error"><b>无法给出改选建议。</b><br/>${extra}</div>`;
+}
+
+function applySuggestionLocally() {
+  if (!lastSuggestion) return;
+  const m = {};
+  for (const item of lastSuggestion.selection) m[item.eventId] = item.claimId;
+  localStorage.setItem('selections', JSON.stringify(m));
+  $('#suggestDialog').close();
+  render();
+  showGlobal('ok',
+    `已在<b>本浏览器</b>套用改选建议（${lastSuggestion.changedEventCount} 个事件改选）；服务器草稿与发布版本均未改动。` +
+    '请点击「校验能否发布」确认后再决定是否发布。');
 }
 
 async function doPublish() {
@@ -439,6 +543,10 @@ async function onClick(e) {
 
   if (t.id === 'restoreCancel') { $('#restoreDialog').close(); return; }
   if (t.id === 'restoreConfirm') { await doRestoreConfirm(); return; }
+
+  if (t.id === 'suggestClose') { $('#suggestDialog').close(); return; }
+  if (t.id === 'suggestApply') { applySuggestionLocally(); return; }
+  if (t.dataset && t.dataset.suggestIndex !== undefined) { await openReselectSuggestion(); return; }
   const restorePreviewNo = t.dataset && t.dataset.restorePreview;
   if (restorePreviewNo !== undefined) { await openRestorePreview(Number(restorePreviewNo)); return; }
 

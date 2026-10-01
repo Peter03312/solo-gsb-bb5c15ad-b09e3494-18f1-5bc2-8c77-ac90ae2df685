@@ -86,6 +86,21 @@ PORT=8080 EDITOR_TOKEN=my-secret npm start
 
 发布成功后得到递增版本号（第 1 版、第 2 版……），事件、所选主张（精度、区间、出处、考异）、关系与求解日期全部**复制进版本快照**；此后修改草稿不影响任何旧版本。访客页只展示当前最新版本。
 
+### 时间无解后查看「改选建议」
+
+当「校验能否发布」报出 **时间无解（temporal）** 时，错误条目上会出现「查看改选建议…」按钮。它在**不改动「先于」关系与各主张日期区间**的前提下，只在每个事件**现有主张**之间寻找可满足全部先后关系的改选组合：
+
+1. **逐事件被选主张 + 草稿修订号**：编辑台把本次预检的 `selection` 与预检返回的 `draftRevision` 一起提交（HTTP API 见文末）。
+2. **改选事件数最少**：先让尽可能多的事件保留原主张；平手时，取「事件 ID 升序排列后的主张 ID 序列」字典序最小者，保证结果唯一可复现。
+3. 返回**最少改选事件数、逐项变更（原主张 → 建议主张，含精度 / 区间 / 出处）、建议组合下每个事件的求解日期**。
+4. **只读**：该接口不修改草稿、不产生发布版本、不推进草稿修订号。编辑台可点「仅在本浏览器套用这些选择」把单选切换为建议组合（仅写入该浏览器 localStorage），随后仍需重新「校验能否发布」并自行决定发布；也可关闭不采纳。
+
+下列情况**明确拒绝**，说明无法靠改选解决（或请求无效）：
+
+- 选择**缺失**（未覆盖每个事件）、**重复**（同一事件给多条）、主张 id 不存在或**不属于该事件** → 400；
+- **关系成环**（含自环）→ 422 `CYCLE`；**事件没有任何主张** → 422 `NO_CLAIMS`；**所有现有主张组合都时间无解** → 422 `NO_FEASIBLE_COMBINATION`；
+- 预检后草稿被任何人增删改过（提交的 `draftRevision` 与当前不一致，含计算期间发生变化）→ **409 `SUGGESTION_STALE`，不返回任何（可能已过期的）建议**，需重新预检后再查看。
+
 ### 从任一已发布版本预览并恢复草稿
 
 在编辑台右下「已发布版本」中，每版都有「预览并恢复为此版」按钮：
@@ -127,11 +142,12 @@ src/
   dates.js      年/月/日精度 → 覆盖区间（公历序数日）
   solver.js     Tarjan 环检测 + 拓扑下界传播求严格先后可行解
   publish.js    发布事务：再校验 + 版本冲突检查 + 写不可变快照
+  suggest.js    时间无解后的改选建议：分支限界求改选最少的可行组合（只读 + 修订号校验）
   draft.js      草稿全貌组装、草稿修订号与草稿变更事务
   restore.js    恢复事务：预览只读 + 乐观并发校验 + 按快照原子重建草稿
   seed.js       演示数据
 public/         访客页与编辑台（原生 HTML/CSS/JS）
-test/           node:test 单元与端到端测试（含成环、无解、409 冲突、恢复）
+test/           node:test 单元与端到端测试（含成环、无解、409 冲突、恢复、改选建议）
 ```
 
 ## 主要 HTTP API
@@ -147,7 +163,13 @@ test/           node:test 单元与端到端测试（含成环、无解、409 �
 - 事件：`POST /api/editor/events`、`PUT/DELETE /api/editor/events/:id`
 - 主张：`POST /api/editor/events/:id/claims`、`PUT/DELETE /api/editor/claims/:claimId`
 - 关系：`POST /api/editor/relations`、`DELETE /api/editor/relations/:id`
-- `POST /api/editor/validate` — 预校验（不落库）
+- `POST /api/editor/validate` — 预校验（不落库）；响应额外带 `draftRevision`
+- `POST /api/editor/suggestions/reselect` — 时间无解后的改选建议（只读）；体含 `selection:[{eventId,claimId}]`、`draftRevision`（取预检响应值）
+  - 200：`{ok, draftRevision, changedEventCount, changes:[{eventId,title,fromClaimId,toClaimId,fromClaim,toClaim}], selection:[{eventId,claimId}], resolvedDates:[{eventId,title,claimId,resolvedDate}], nodesVisited, totalCombinations}`
+  - 400：`{code:"MISSING_SELECTION"|"DUPLICATE_SELECTION"|"BAD_SELECTION"|"INVALID_SELECTION", message, eventIds}`
+  - 409：`{code:"SUGGESTION_STALE", message, sentDraftRevision, currentDraftRevision}` —— 草稿在预检后已变化，重新预检
+  - 422：`{code:"CYCLE"|"NO_CLAIMS"|"NO_FEASIBLE_COMBINATION", message, ...}` —— 无法靠改选解决；`CYCLE` 另带 `errors`
+  - 401：缺少 / 错误的 `X-Editor-Token`
 - `POST /api/editor/publish` — 发布；体含 `selection:[{eventId,claimId}]`、`baseVersionNo`、`editor`、`note`
   - 422：`{errors:[{type:missing|cycle|temporal, eventIds, relationIds, message, detail}]}`
   - 409：`{code:"VERSION_CONFLICT", baseVersionNo, currentVersionNo, currentVersion}`
@@ -156,4 +178,51 @@ test/           node:test 单元与端到端测试（含成环、无解、409 �
   - `POST /api/editor/restore/confirm` — 体含 `versionNo`、`draftRevision`、`expectedLatestVersionNo`（取预览返回值）；原子替换整个草稿，返回 `{restoredFromVersionNo, idMap:{events,claims,relations}, state}`（`state` 即新草稿全貌，含待选主张）
     - 409：`{code:"RESTORE_CONFLICT", message, previewDraftRevision, currentDraftRevision, expectedLatestVersionNo, currentVersionNo}`
     - 404：`{code:"VERSION_NOT_FOUND"}`
-- 所有草稿增删改接口（含恢复确认）都会推进 `GET /api/editor/state` 返回的 `draftRevision`；预览与发布不推进。
+- 所有草稿增删改接口（含恢复确认）都会推进 `GET /api/editor/state` 返回的 `draftRevision`；预览、发布与改选建议不推进。
+
+## 改选建议 HTTP API 调用示例
+
+先预检拿到 `draftRevision`（预检失败为时间无解时也会返回该字段），再凭同一份被选主张与修订号查看改选建议：
+
+```bash
+TOKEN=change-me-please
+BASE=http://localhost:3000
+
+# 1) 预检（selection 为逐事件被选主张；失败也会返回 draftRevision）
+curl -s -X POST "$BASE/api/editor/validate" \
+  -H "X-Editor-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"selection":[{"eventId":1,"claimId":1},{"eventId":2,"claimId":3}]}'
+# -> {"ok":false,"errors":[{"type":"temporal",...}],"draftRevision":7}
+
+# 2) 查看改选建议（原样回传 selection 与预检的 draftRevision）
+curl -s -X POST "$BASE/api/editor/suggestions/reselect" \
+  -H "X-Editor-Token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"selection":[{"eventId":1,"claimId":1},{"eventId":2,"claimId":3}],"draftRevision":7}'
+```
+
+可行时返回（节选）：
+
+```json
+{
+  "ok": true,
+  "draftRevision": 7,
+  "changedEventCount": 1,
+  "changes": [
+    { "eventId": 2, "title": "春月会议",
+      "fromClaimId": 3, "toClaimId": 4,
+      "fromClaim": { "claimId": 3, "precision": "month", "dateLabel": "1958 年 01 月",
+                     "intervalStart": "1958-01-01", "intervalEnd": "1958-01-31", "source": "s2" },
+      "toClaim":   { "claimId": 4, "precision": "month", "dateLabel": "1959 年 01 月",
+                     "intervalStart": "1959-01-01", "intervalEnd": "1959-01-31", "source": "s2b" } }
+  ],
+  "selection": [ { "eventId": 1, "claimId": 1 }, { "eventId": 2, "claimId": 4 } ],
+  "resolvedDates": [
+    { "eventId": 1, "title": "冬月会议", "claimId": 1, "resolvedDate": "1958-12-01" },
+    { "eventId": 2, "title": "春月会议", "claimId": 4, "resolvedDate": "1959-01-01" }
+  ]
+}
+```
+
+- 预检后草稿若已被修改，同样的请求返回 **409 `SUGGESTION_STALE`**（带 `sentDraftRevision / currentDraftRevision`），重新做一次预检、用新的 `draftRevision` 重试即可。
+- `resolvedDates` 是系统在建议组合下为每个事件在其主张区间内确定的具体日期（与发布求解器同一套严格先后规则）。
+- 搜索默认带 200 万节点的安全预算（环境变量 `RESELECT_NODE_LIMIT` 可调）；极端规模下超预算返回 422 `SUGGESTION_TOO_COMPLEX`，不会武断宣称无解。

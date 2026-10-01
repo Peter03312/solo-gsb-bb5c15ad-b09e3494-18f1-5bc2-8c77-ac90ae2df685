@@ -9,8 +9,10 @@ const {
   claimRowToApi,
   eventRowToApi,
   readDraftState,
+  getDraftRevision,
 } = require('./draft');
 const { previewRestore, confirmRestore } = require('./restore');
+const { buildReselectSuggestion } = require('./suggest');
 
 const router = express.Router();
 
@@ -219,7 +221,7 @@ router.post('/api/editor/validate', (req, res) => {
   const selectionList = normalizeSelection(req.body);
   const result = evaluateDraft(selectionList);
   if (!result.ok) {
-    return res.json({ ok: false, errors: result.errors });
+    return res.json({ ok: false, errors: result.errors, draftRevision: getDraftRevision() });
   }
   const { dates, events, selected } = result;
   const preview = events
@@ -235,7 +237,15 @@ router.post('/api/editor/validate', (req, res) => {
       };
     })
     .sort((a, b) => a.resolvedDate.localeCompare(b.resolvedDate));
-  res.json({ ok: true, preview });
+  res.json({ ok: true, preview, draftRevision: getDraftRevision() });
+});
+
+// ---- 改选建议：预检时间无解后，凭被选主张与草稿修订号只读求解 ----
+router.post('/api/editor/suggestions/reselect', (req, res) => {
+  const selectionList = normalizeSelection(req.body);
+  const draftRevision = requireNonNegativeInt(req.body || {}, 'draftRevision');
+  const suggestion = buildReselectSuggestion({ selectionList, draftRevision });
+  res.json(suggestion);
 });
 
 function iso(ord) {

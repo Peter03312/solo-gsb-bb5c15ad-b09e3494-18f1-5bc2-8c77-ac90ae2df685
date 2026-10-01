@@ -101,6 +101,18 @@
     </div>
   </dialog>
 
+  <!-- 改选建议对话框（只读，不改草稿/发布） -->
+  <dialog id="suggestDialog">
+    <div class="d-head" style="background:var(--paper);color:var(--accent-dark);border-bottom-color:var(--line)">
+      💡 改选建议（只读，不会改动草稿或发布版本）
+    </div>
+    <div class="d-body" id="suggestBody">计算中…</div>
+    <div class="d-foot">
+      <button class="secondary" id="suggestClose" type="button">关闭</button>
+      <button id="suggestApply" type="button">仅在本浏览器套用这些选择</button>
+    </div>
+  </dialog>
+
   <script src="/editor.js"></script>
 </body>
 </html>
