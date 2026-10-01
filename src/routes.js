@@ -9,8 +9,10 @@ const {
   claimRowToApi,
   eventRowToApi,
   readDraftState,
+  getDraftRevision,
 } = require('./draft');
 const { previewRestore, confirmRestore } = require('./restore');
+const { suggestReselection } = require('./suggest');
 
 const router = express.Router();
 
@@ -219,7 +221,7 @@ router.post('/api/editor/validate', (req, res) => {
   const selectionList = normalizeSelection(req.body);
   const result = evaluateDraft(selectionList);
   if (!result.ok) {
-    return res.json({ ok: false, errors: result.errors });
+    return res.json({ ok: false, draftRevision: getDraftRevision(), errors: result.errors });
   }
   const { dates, events, selected } = result;
   const preview = events
@@ -235,12 +237,22 @@ router.post('/api/editor/validate', (req, res) => {
       };
     })
     .sort((a, b) => a.resolvedDate.localeCompare(b.resolvedDate));
-  res.json({ ok: true, preview });
+  res.json({ ok: true, draftRevision: getDraftRevision(), preview });
 });
 
 function iso(ord) {
   return require('./dates').isoFromOrdinal(ord);
 }
+
+// ---- 时间无解时的改选建议（只读，不落库、不推进修订号）----
+// 体含 selection:[{eventId,claimId}]（逐事件、不缺不重、归属合法）与 draftRevision。
+// 409 DRAFT_REVISION_STALE：草稿在预检后或计算期间被改动，不返回过期建议。
+// 422 UNRESOLVABLE_BY_RESELECTION：成环 / 事件无主张 / 全部组合均无解。
+router.post('/api/editor/suggest-reselection', (req, res) => {
+  const selectionList = normalizeSelection(req.body);
+  const draftRevision = requireNonNegativeInt(req.body || {}, 'draftRevision');
+  res.json(suggestReselection({ selectionList, draftRevision }));
+});
 
 function normalizeSelection(body) {
   const raw = body && body.selection;

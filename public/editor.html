@@ -91,9 +91,20 @@
     </div>
   </dialog>
 
+  <!-- 时间无解：改选建议对话框（只读） -->
+  <dialog id="suggestDialog" style="width:min(760px,94vw)">
+    <div class="d-head" style="background:var(--paper);color:var(--accent-dark);border-bottom-color:var(--line)">
+      💡 改选建议（预检为「时间无解」时；只读，不改草稿或发布版本）
+    </div>
+    <div class="d-body" id="suggestBody">加载中…</div>
+    <div class="d-foot">
+      <button class="secondary" id="suggestCancel" type="button">关闭</button>
+      <button id="suggestApply" type="button" disabled>应用到本机选择（不写服务器）</button>
+    </div>
+  </dialog>
+
   <!-- 从历史版本恢复草稿对话框 -->
-  <dialog id="restoreDialog">
-    <div class="d-head" style="background:var(--paper);color:var(--accent-dark);border-bottom-color:var(--line)">↩ 从已发布版本恢复草稿（预览，尚未改动数据）</div>
+  <dialog id="restoreDialog">    <div class="d-head" style="background:var(--paper);color:var(--accent-dark);border-bottom-color:var(--line)">↩ 从已发布版本恢复草稿（预览，尚未改动数据）</div>
     <div class="d-body" id="restoreBody">加载预览…</div>
     <div class="d-foot">
       <button class="secondary" id="restoreCancel" type="button">取消</button>
